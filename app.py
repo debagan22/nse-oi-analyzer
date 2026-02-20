@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
-from datetime import datetime
+import time
 
-st.set_page_config(page_title="Groww OI Analyzer", layout="wide")
+st.set_page_config(page_title="Live F&O Scanner", layout="wide")
 
 @st.cache_resource
 def get_groww_client():
@@ -16,51 +16,77 @@ def get_groww_client():
         st.error(f"Auth Error: {e}")
         return None
 
-st.title("🛡️ Groww F&O Suggestion Engine")
 groww = get_groww_client()
 
+# A list of high-liquidity F&O stocks. 
+# You can expand this to all 180+ stocks once you verify speed.
+FO_WATCHLIST = [
+    "NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", 
+    "INFY", "TCS", "TATASTEEL", "ADANIENT", "ITC", "BHARTIARTL"
+]
+
+st.title("🏹 Live F&O Buy/Sell Advisor")
+
 if groww:
-    col1, col2 = st.columns(2)
-    with col1:
-        symbol = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
-    with col2:
-        # Note: Ensure this date is a VALID upcoming Thursday!
-        expiry = st.text_input("Expiry (YYYY-MM-DD)", value="2026-02-26")
-
-    if st.button("Fetch Option Chain"):
-        try:
-            # 1. Fetch live data
-            response = groww.get_option_chain(exchange="NSE", underlying=symbol, expiry_date=expiry)
-            
-            # 2. Extract 'strikes' (Groww nesting: payload -> strikes)
-            # The structure is often response['payload']['strikes'] or response['strikes']
-            strikes_data = response.get('payload', {}).get('strikes', response.get('strikes', {}))
-
-            if not strikes_data:
-                st.warning(f"No data found for {symbol} on {expiry}. Try the next expiry date.")
-            else:
-                # 3. Flatten the dictionary into a list for Pandas
-                rows = []
-                for strike, data in strikes_data.items():
-                    rows.append({
-                        "Strike": strike,
-                        "CE_OI": data.get('CE', {}).get('open_interest', 0),
-                        "PE_OI": data.get('PE', {}).get('open_interest', 0),
-                        "CE_LTP": data.get('CE', {}).get('ltp', 0),
-                        "PE_LTP": data.get('PE', {}).get('ltp', 0)
-                    })
+    if st.button("🚀 Start Live Market Scan"):
+        results = []
+        progress = st.progress(0)
+        
+        for i, stock in enumerate(FO_WATCHLIST):
+            try:
+                # Fetching snapshot with OI data
+                snap = groww.get_quote(exchange="NSE", segment="FNO", trading_symbol=stock)
                 
-                df = pd.DataFrame(rows)
-                df['Strike'] = pd.to_numeric(df['Strike'])
-                df = df.sort_values("Strike")
+                ltp = snap.get('last_price', 0)
+                price_chg = snap.get('day_change_perc', 0)
+                oi_chg = snap.get('oi_day_change_percentage', 0)
 
-                # 4. Show Analysis
-                total_ce = df['CE_OI'].sum()
-                total_pe = df['PE_OI'].sum()
-                pcr = total_pe / total_ce if total_ce > 0 else 0
-                
-                st.metric("Put-Call Ratio (PCR)", f"{pcr:.2f}")
-                st.dataframe(df, use_container_width=True)
+                # --- AI STRATEGY LOGIC ---
+                if price_chg > 0.5 and oi_chg > 2:
+                    signal = "BUY (Long Buildup)"
+                    rate = f"Above {round(ltp * 1.002, 2)}" # Entry slightly above LTP
+                    color = "#d4edda" # Green
+                elif price_chg < -0.5 and oi_chg > 2:
+                    signal = "SELL (Short Buildup)"
+                    rate = f"Below {round(ltp * 0.998, 2)}" # Entry slightly below LTP
+                    color = "#f8d7da" # Red
+                elif price_chg > 0.5 and oi_chg < -2:
+                    signal = "BUY (Short Covering)"
+                    rate = f"At Market ({ltp})"
+                    color = "#d1ecf1" # Blue
+                elif price_chg < -0.5 and oi_chg < -2:
+                    signal = "SELL (Long Unwinding)"
+                    rate = f"At Market ({ltp})"
+                    color = "#fff3cd" # Yellow
+                else:
+                    signal = "WAIT (Neutral)"
+                    rate = "N/A"
+                    color = "#ffffff"
 
-        except Exception as e:
-            st.error(f"Data processing error: {e}")
+                results.append({
+                    "Stock": stock,
+                    "LTP": ltp,
+                    "Price %": f"{price_chg:.2f}%",
+                    "OI %": f"{oi_chg:.2f}%",
+                    "Signal": signal,
+                    "Entry Rate": rate,
+                    "Color": color
+                })
+            except:
+                continue
+            progress.progress((i + 1) / len(FO_WATCHLIST))
+
+        # --- DISPLAY AS STYLED TABLE ---
+        df = pd.DataFrame(results)
+        
+        def apply_row_style(row):
+            return [f'background-color: {row["Color"]}'] * len(row)
+
+        st.subheader("📊 Live Trading Signals")
+        if not df.empty:
+            st.dataframe(df.style.apply(apply_row_style, axis=1).hide(axis='index'), use_container_width=True)
+        else:
+            st.warning("No data returned. Ensure the market is open or check API subscription.")
+
+else:
+    st.info("Please connect your Groww API via Secrets to start.")
