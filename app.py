@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
 
-st.set_page_config(page_title="F&O Terminal Fix", layout="wide")
+st.set_page_config(page_title="F&O Stock Advisor", layout="wide")
 
 @st.cache_resource
 def get_groww_client():
@@ -12,67 +12,74 @@ def get_groww_client():
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"Auth Failed: {e}")
+        st.error(f"API Connection Error: {e}")
         return None
 
 def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🏹 Ultimate Symbol Debugger")
+st.title("🏹 F&O Advisor (Space-Separated Format)")
+
+# Your verified format: NIFTY 27FEB 22000 CE
+# Based on your input, we'll use 24FEB (Tuesday Expiry) for stocks
+EXPIRY = "24FEB" 
+
 groww = get_groww_client()
 
 if groww:
-    # 1. SIDEBAR SEARCH - Use this if the main scan fails
-    st.sidebar.header("🔍 Manual Symbol Test")
-    manual_sym = st.sidebar.text_input("Enter exact symbol from Groww App", "RELIANCE24FEB2800CE")
-    if st.sidebar.button("Test Manual Symbol"):
-        try:
-            res = groww.get_quote(trading_symbol=manual_sym.upper(), exchange="NSE", segment="FNO")
-            st.sidebar.write(res)
-        except Exception as e:
-            st.sidebar.error(f"Error: {e}")
+    stock_map = {
+        "RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10, 
+        "ICICIBANK": 10, "INFY": 20, "TCS": 20, "ITC": 5
+    }
 
-    # 2. MAIN SCANNER
-    stock_map = {"RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10}
-    
-    if st.button("🚀 RUN TRIPLE-FORMAT SCAN"):
+    if st.button("🚀 SCAN LIVE STOCKS"):
         results = []
+        
         for sym, step in stock_map.items():
             try:
-                # Get Spot
-                spot = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
-                ltp = spot.get('last_price', 0)
+                # 1. Get Spot Price
+                spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
+                ltp = spot_data.get('last_price', 0)
+                p_chg = spot_data.get('day_change_perc', 0)
+                
                 if ltp > 0:
                     atm = get_atm(ltp, step)
+                    opt_type = "CE" if p_chg >= 0 else "PE"
                     
-                    # TRYING 3 DIFFERENT GROWW FORMATS FOR 2026
-                    # A: Standard (RELIANCE24FEB2800CE)
-                    # B: Year-Month-Day (RELIANCE262242800CE)
-                    # C: Short Month (RELIANCE24FEB262800CE)
-                    formats = [
-                        f"{sym}24FEB{atm}CE",
-                        f"{sym}26224{atm}CE",
-                        f"{sym}24FEB26{atm}CE"
-                    ]
+                    # UPDATED FORMAT: [SYMBOL] [DATE] [STRIKE] [TYPE]
+                    # Example: RELIANCE 24FEB 2800 CE
+                    opt_sym_space = f"{sym} {EXPIRY} {atm} {opt_type}"
+                    opt_sym_no_space = f"{sym}{EXPIRY}{atm}{opt_type}"
                     
-                    found_data = False
-                    for fmt in formats:
-                        opt_data = groww.get_quote(trading_symbol=fmt, exchange="NSE", segment="FNO")
-                        if opt_data.get('last_price', 0) > 0:
-                            results.append({
-                                "Stock": sym,
-                                "Used Format": fmt,
-                                "LTP": opt_data['last_price'],
-                                "Target": round(opt_data['last_price'] * 1.3, 1),
-                                "StopLoss": round(opt_data['last_price'] * 0.8, 1)
-                            })
-                            found_data = True
-                            break
+                    # 2. Try Space Format first
+                    opt_data = groww.get_quote(trading_symbol=opt_sym_space, exchange="NSE", segment="FNO")
+                    opt_ltp = opt_data.get('last_price', 0)
                     
-                    if not found_data:
-                        st.write(f"❌ All formats failed for {sym}. Tested: {formats}")
-            except Exception as e:
-                continue
+                    # Fallback to No-Space if 0
+                    if not opt_ltp:
+                        opt_data = groww.get_quote(trading_symbol=opt_sym_no_space, exchange="NSE", segment="FNO")
+                        opt_ltp = opt_data.get('last_price', 0)
+                        final_sym = opt_sym_no_space
+                    else:
+                        final_sym = opt_sym_space
+
+                    if opt_ltp > 0:
+                        results.append({
+                            "STOCK": sym,
+                            "SPOT": ltp,
+                            "OPTION": final_sym,
+                            "PREMIUM": opt_ltp,
+                            "SIGNAL": "BUY CALL 🟢" if opt_type == "CE" else "BUY PUT 🔴",
+                            "ENTRY ABOVE": round(opt_ltp * 1.05, 1),
+                            "TARGET": round(opt_ltp * 1.30, 1),
+                            "STOP-LOSS": round(opt_ltp * 0.85, 1)
+                        })
+            except: continue
 
         if results:
             st.table(pd.DataFrame(results))
+        else:
+            st.warning("No data found. Ensure your Groww segment for F&O is active.")
+
+st.divider()
+st.info(f"💡 Format used: **{stock_map.keys().__iter__().__next__()} {EXPIRY} [STRIKE] [TYPE]**")
