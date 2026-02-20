@@ -1,14 +1,13 @@
 import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
-from datetime import datetime
 
-st.set_page_config(page_title="Options Entry/Exit Pro", layout="wide")
+st.set_page_config(page_title="F&O Stock Advisor", layout="wide")
 
-# --- Configuration ---
-EXPIRY_DATE = "2026-02-26"  # Format: YYYY-MM-DD
-EXPIRY_SHORT = "26FEB"     # Format for symbol: DDMMM (e.g., 26FEB)
-YEAR_SHORT = "26"          # Last two digits of year
+# --- AUTO-CONFIG FOR EXPIRY ---
+EXPIRY_STR = "26FEB"  
+YEAR_STR = "26"      
+EXPIRY_FULL = "2026-02-26" 
 
 @st.cache_resource
 def get_groww_client():
@@ -18,62 +17,70 @@ def get_groww_client():
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"Connect your API first! Error: {e}")
+        st.error(f"API Auth Failed: {e}")
         return None
 
-def get_atm_strike(price, step=50):
+def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🎯 Options Entry/Exit Advisor")
+st.title("🎯 F&O Stock Entry/Exit Advisor")
+st.caption("Scanning High-Volume F&O Stocks (Indices Excluded)")
+
 groww = get_groww_client()
 
 if groww:
-    # We focus on the big movers
-    underlyings = {"NIFTY": 50, "BANKNIFTY": 100}
+    # Map of Top F&O Stocks and their Strike Intervals
+    # These are specific for each stock (e.g., SBI moves in steps of 5, Reliance in 20)
+    stock_fno_map = {
+        "RELIANCE": 20, "HDFCBANK": 10, "SBIN": 5, 
+        "ICICIBANK": 10, "INFY": 20, "TCS": 20, 
+        "ITC": 5, "AXISBANK": 10, "KOTAKBANK": 20, "LT": 20
+    }
     
-    if st.button("🔍 SCAN OPTIONS NOW"):
+    if st.button("🔍 SCAN STOCK OPTIONS"):
         results = []
-        for symbol, step in underlyings.items():
+        progress = st.progress(0)
+        
+        for i, (sym, step) in enumerate(stock_fno_map.items()):
             try:
                 # 1. Get Spot Price
-                spot_data = groww.get_quote(trading_symbol=symbol, exchange="NSE", segment="CASH")
+                spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
                 spot_price = spot_data.get('last_price')
-                p_chg = spot_data.get('day_change_perc', 0)
-                
+                day_chg = spot_data.get('day_change_perc', 0)
+
                 if spot_price:
-                    atm = get_atm_strike(spot_price, step)
+                    atm_strike = get_atm(spot_price, step)
                     
-                    # 2. Construct CE and PE Symbols
-                    # Format: NIFTY + 26 + FEB + 24500 + CE
-                    ce_sym = f"{symbol}{YEAR_SHORT}{EXPIRY_SHORT}{atm}CE"
-                    pe_sym = f"{symbol}{YEAR_SHORT}{EXPIRY_SHORT}{atm}PE"
+                    # 2. Pick CE if trend is Up, PE if trend is Down
+                    option_type = "CE" if day_chg >= 0 else "PE"
+                    fno_symbol = f"{sym}{YEAR_STR}{EXPIRY_STR}{atm_strike}{option_type}"
                     
-                    # 3. Fetch Option Data
-                    ce_data = groww.get_quote(trading_symbol=ce_sym, exchange="NSE", segment="FNO")
-                    pe_data = groww.get_quote(trading_symbol=pe_sym, exchange="NSE", segment="FNO")
-                    
-                    # 4. Suggestions based on Trend
-                    if p_chg > 0: # Bullish Trend
+                    # 3. Fetch Option Details
+                    opt_data = groww.get_quote(trading_symbol=fno_symbol, exchange="NSE", segment="FNO")
+                    opt_ltp = opt_data.get('last_price', 0)
+                    opt_oi_chg = opt_data.get('oi_day_change_percentage', 0)
+
+                    if opt_ltp > 0:
                         results.append({
-                            "CONTRACT": ce_sym, "LTP": ce_data.get('last_price'),
-                            "ACTION": "BUY CALL 🟢", "ENTRY": f"Above {round(ce_data.get('last_price',0)*1.05, 1)}",
-                            "TARGET": round(ce_data.get('last_price',0)*1.30, 1),
-                            "STOPLOSS": round(ce_data.get('last_price',0)*0.80, 1)
+                            "STOCK": sym,
+                            "SPOT": spot_price,
+                            "OPTION CONTRACT": fno_symbol,
+                            "PREMIUM (LTP)": opt_ltp,
+                            "OI CHG %": f"{opt_oi_chg if opt_oi_chg else 0:.2f}%",
+                            "ACTION": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
+                            "ENTRY": f"Above {round(opt_ltp * 1.05, 1)}", # 5% confirmation
+                            "TARGET": round(opt_ltp * 1.30, 1),           # 30% profit
+                            "STOP-LOSS": round(opt_ltp * 0.80, 1)         # 20% risk
                         })
-                    else: # Bearish Trend
-                        results.append({
-                            "CONTRACT": pe_sym, "LTP": pe_data.get('last_price'),
-                            "ACTION": "BUY PUT 🔴", "ENTRY": f"Above {round(pe_data.get('last_price',0)*1.05, 1)}",
-                            "TARGET": round(pe_data.get('last_price',0)*1.30, 1),
-                            "STOPLOSS": round(pe_data.get('last_price',0)*0.80, 1)
-                        })
-            except Exception as e:
-                st.error(f"Error fetching {symbol}: {e}")
+            except: continue
+            progress.progress((i + 1) / len(stock_fno_map))
 
         if results:
-            st.table(pd.DataFrame(results))
+            df = pd.DataFrame(results)
+            st.dataframe(df, use_container_width=True)
+            st.success("Scan Complete. Recommendations are based on Price-OI Momentum.")
         else:
-            st.warning("No data found. Ensure EXPIRY_DATE is correct in the code.")
+            st.warning("No data found. Ensure market is open and API is active.")
 
 st.divider()
-st.info("💡 **Strategy:** This suggests buying the ATM option if the trend is strong. Entry is set 5% above current price to confirm momentum.")
+st.info("💡 **Why 5% Entry?** Buying an option immediately is risky. The 'Entry' level acts as a trigger; only buy if the price breaks that level to confirm the move.")
