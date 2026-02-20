@@ -1,6 +1,54 @@
 import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
+import pyotp
+
+# 1. AUTHENTICATION SECTION
+def get_groww_client():
+    try:
+        # Accessing secrets you've set in Streamlit Cloud "Advanced Settings"
+        api_key = st.secrets["GROWW_API_KEY"]
+        api_secret = st.secrets["GROWW_API_SECRET"]
+        
+        # Step: Generate a daily access token
+        # Some versions might require a checksum or TOTP, 
+        # but the standard SDK uses Key + Secret for the token flow
+        access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
+        return GrowwAPI(access_token)
+    except Exception as e:
+        st.error(f"⚠️ Auth Error: {e}")
+        return None
+
+# 2. APP UI
+st.title("🎯 Groww Option Analyzer")
+groww = get_groww_client()
+
+if groww:
+    st.success("Successfully connected to Groww API!")
+    
+    symbol = st.selectbox("Select Index", ["NIFTY", "BANKNIFTY"])
+    expiry = st.text_input("Expiry Date (YYYY-MM-DD)", value="2026-02-26")
+
+    if st.button("Fetch OI Data"):
+        # Fetching data directly from Groww
+        chain = groww.get_option_chain(exchange="NSE", underlying=symbol, expiry_date=expiry)
+        df = pd.DataFrame(chain['strikes'])
+        
+        # Suggestion Logic: Put-Call Ratio (PCR)
+        total_pe_oi = df['pe_open_interest'].sum()
+        total_ce_oi = df['ce_open_interest'].sum()
+        pcr = total_pe_oi / total_ce_oi
+        
+        st.metric("Current PCR", round(pcr, 2))
+        
+        if pcr > 1.25:
+            st.success("BULLISH SENTIMENT: High Put writing. Look for Buy signals.")
+        elif pcr < 0.75:
+            st.error("BEARISH SENTIMENT: High Call writing. Look for Sell signals.")
+        else:
+            st.warning("NEUTRAL SENTIMENT: Market is consolidating.")import streamlit as st
+import pandas as pd
+from growwapi import GrowwAPI
 
 # 1. Setup Page
 st.set_page_config(page_title="Groww Option Advisor", layout="wide")
