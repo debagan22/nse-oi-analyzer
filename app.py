@@ -1,8 +1,14 @@
 import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
+from datetime import datetime
 
-st.set_page_config(page_title="F&O Data Pro", layout="wide")
+st.set_page_config(page_title="Options Entry/Exit Pro", layout="wide")
+
+# --- Configuration ---
+EXPIRY_DATE = "2026-02-26"  # Format: YYYY-MM-DD
+EXPIRY_SHORT = "26FEB"     # Format for symbol: DDMMM (e.g., 26FEB)
+YEAR_SHORT = "26"          # Last two digits of year
 
 @st.cache_resource
 def get_groww_client():
@@ -12,62 +18,62 @@ def get_groww_client():
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"Authentication Failed: {e}")
+        st.error(f"Connect your API first! Error: {e}")
         return None
 
-def get_suggestion(ltp, p_chg, oi_chg):
-    # Bullish: Price Up + OI Up
-    if p_chg > 0.2 and oi_chg > 1.0:
-        return {"View": "BULLISH 📈", "Entry": f"Above {round(ltp*1.001, 1)}", "Tgt": round(ltp*1.015, 1), "SL": round(ltp*0.992, 1), "Color": "#d4edda"}
-    # Bearish: Price Down + OI Up
-    elif p_chg < -0.2 and oi_chg > 1.0:
-        return {"View": "BEARISH 📉", "Entry": f"Below {round(ltp*0.999, 1)}", "Tgt": round(ltp*0.985, 1), "SL": round(ltp*1.008, 1), "Color": "#f8d7da"}
-    return {"View": "NEUTRAL 😴", "Entry": "Wait", "Tgt": "-", "SL": "-", "Color": "#ffffff"}
+def get_atm_strike(price, step=50):
+    return int(round(price / step) * step)
 
-st.title("🏹 High-Speed F&O Scanner")
+st.title("🎯 Options Entry/Exit Advisor")
 groww = get_groww_client()
 
 if groww:
-    if st.button("🔍 START LIVE SCAN"):
-        # List of underlyings (Indices and Stocks)
-        stocks = ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "SBIN", "ICICIBANK", "INFY", "TCS"]
+    # We focus on the big movers
+    underlyings = {"NIFTY": 50, "BANKNIFTY": 100}
+    
+    if st.button("🔍 SCAN OPTIONS NOW"):
         results = []
-        progress = st.progress(0)
-        
-        for i, sym in enumerate(stocks):
+        for symbol, step in underlyings.items():
             try:
-                # FIX: Use segment="CASH" for indices and stock names
-                # Groww requires segment="CASH" for NIFTY, BANKNIFTY, and stock names
-                data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
+                # 1. Get Spot Price
+                spot_data = groww.get_quote(trading_symbol=symbol, exchange="NSE", segment="CASH")
+                spot_price = spot_data.get('last_price')
+                p_chg = spot_data.get('day_change_perc', 0)
                 
-                ltp = data.get('last_price', 0)
-                p_chg = data.get('day_change_perc', 0)
-                # OI is only available in specific F&O contract calls. 
-                # For basic scanning, we focus on Price and Volume momentum.
-                oi_chg = data.get('oi_day_change_percentage', 0) 
-
-                if ltp > 0:
-                    sug = get_suggestion(ltp, p_chg, oi_chg)
-                    results.append({
-                        "STOCK": sym, 
-                        "LTP": ltp, 
-                        "PRICE %": f"{p_chg:.2f}%",
-                        "SIGNAL": sug['View'],
-                        "ENTRY": sug['Entry'], 
-                        "TARGET": sug['Tgt'], 
-                        "STOP-LOSS": sug['SL'], 
-                        "Color": sug['Color']
-                    })
+                if spot_price:
+                    atm = get_atm_strike(spot_price, step)
+                    
+                    # 2. Construct CE and PE Symbols
+                    # Format: NIFTY + 26 + FEB + 24500 + CE
+                    ce_sym = f"{symbol}{YEAR_SHORT}{EXPIRY_SHORT}{atm}CE"
+                    pe_sym = f"{symbol}{YEAR_SHORT}{EXPIRY_SHORT}{atm}PE"
+                    
+                    # 3. Fetch Option Data
+                    ce_data = groww.get_quote(trading_symbol=ce_sym, exchange="NSE", segment="FNO")
+                    pe_data = groww.get_quote(trading_symbol=pe_sym, exchange="NSE", segment="FNO")
+                    
+                    # 4. Suggestions based on Trend
+                    if p_chg > 0: # Bullish Trend
+                        results.append({
+                            "CONTRACT": ce_sym, "LTP": ce_data.get('last_price'),
+                            "ACTION": "BUY CALL 🟢", "ENTRY": f"Above {round(ce_data.get('last_price',0)*1.05, 1)}",
+                            "TARGET": round(ce_data.get('last_price',0)*1.30, 1),
+                            "STOPLOSS": round(ce_data.get('last_price',0)*0.80, 1)
+                        })
+                    else: # Bearish Trend
+                        results.append({
+                            "CONTRACT": pe_sym, "LTP": pe_data.get('last_price'),
+                            "ACTION": "BUY PUT 🔴", "ENTRY": f"Above {round(pe_data.get('last_price',0)*1.05, 1)}",
+                            "TARGET": round(pe_data.get('last_price',0)*1.30, 1),
+                            "STOPLOSS": round(pe_data.get('last_price',0)*0.80, 1)
+                        })
             except Exception as e:
-                st.sidebar.error(f"Error on {sym}: {e}")
-                continue
-            progress.progress((i + 1) / len(stocks))
+                st.error(f"Error fetching {symbol}: {e}")
 
         if results:
-            df = pd.DataFrame(results)
-            st.table(df.style.apply(lambda x: [f'background-color: {x.Color}'] * len(x), axis=1))
+            st.table(pd.DataFrame(results))
         else:
-            st.error("No data returned. Ensure your segment permissions are active on Groww.")
+            st.warning("No data found. Ensure EXPIRY_DATE is correct in the code.")
 
 st.divider()
-st.info("💡 Note: For 'NIFTY' and 'BANKNIFTY', we use the CASH segment to get the underlying Index price.")
+st.info("💡 **Strategy:** This suggests buying the ATM option if the trend is strong. Entry is set 5% above current price to confirm momentum.")
