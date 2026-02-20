@@ -18,10 +18,10 @@ def get_groww_client():
 def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🏹 F&O Pro: Entry & Exit Scanner")
+st.title("🏹 NSE Stock Option Advisor (24-Feb Expiry)")
 
-# Standard Monthly Expiry
-EXPIRY = "26FEB"
+# Updated to match NSE/Groww Tuesday Expiry for Feb 2026
+EXPIRY = "24FEB"
 
 groww = get_groww_client()
 
@@ -33,9 +33,8 @@ if groww:
 
     if st.button("🚀 SCAN LIVE TRADES"):
         results = []
-        progress = st.progress(0)
         
-        for i, (sym, step) in enumerate(stock_map.items()):
+        for sym, step in stock_map.items():
             try:
                 # 1. Get Spot Data
                 spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
@@ -52,33 +51,21 @@ if groww:
                     opt_ltp = opt_data.get('last_price', 0)
 
                     if opt_ltp > 0:
-                        # CALCULATION LOGIC
-                        entry_price = round(opt_ltp * 1.05, 1) # Buy above this
-                        target_price = round(opt_ltp * 1.30, 1) # +30%
-                        stop_loss = round(opt_ltp * 0.85, 1)   # -15%
-                        
                         results.append({
                             "STOCK": sym,
                             "SPOT": ltp,
                             "OPTION": opt_sym,
-                            "CURRENT PREM": opt_ltp,
+                            "PREMIUM": opt_ltp,
                             "SIGNAL": "BUY CALL 🟢" if opt_type == "CE" else "BUY PUT 🔴",
-                            "ENTRY ABOVE": entry_price,
-                            "TARGET (EXIT)": target_price,
-                            "STOP-LOSS": stop_loss,
-                            "RISK:REWARD": "1:2"
+                            "ENTRY ABOVE": round(opt_ltp * 1.05, 1),
+                            "TARGET (EXIT)": round(opt_ltp * 1.30, 1),
+                            "STOP-LOSS": round(opt_ltp * 0.85, 1)
                         })
-            except:
-                continue
-            progress.progress((i + 1) / len(stock_map))
+            except: continue
 
         if results:
-            # Displaying as a styled table for clarity
-            df = pd.DataFrame(results)
-            st.table(df)
-            st.success("Analysis Complete. Use 'Entry Above' as your trigger price.")
+            st.table(pd.DataFrame(results))
         else:
-            st.warning("No data found. Ensure market is open (9:15 AM - 3:30 PM).")
+            st.warning("No data found. Ensure you are using the correct 24FEB symbol format.")
 
-st.divider()
-st.info("💡 **Exit Strategy:** If the price hits the **Target**, exit immediately to lock in gains. If it drops to the **Stop-Loss**, exit to protect your capital from further decay.")
+st.info("💡 **Note:** NSE Stock F&O now expires on the last Tuesday of the month (Feb 24, 2026).")
