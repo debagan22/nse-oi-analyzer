@@ -2,14 +2,11 @@ import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
 
-st.set_page_config(page_title="F&O Pro Scanner", layout="wide")
+st.set_page_config(page_title="F&O Smart Advisor", layout="wide")
 
 @st.cache_resource
 def get_groww_client():
     try:
-        if "GROWW_API_KEY" not in st.secrets:
-            st.error("Missing GROWW_API_KEY in Secrets.")
-            return None
         api_key = st.secrets["GROWW_API_KEY"]
         api_secret = st.secrets["GROWW_API_SECRET"]
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
@@ -21,24 +18,25 @@ def get_groww_client():
 def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🏹 F&O Smart Entry Advisor")
+st.title("🎯 Pro Stock Options Advisor")
 groww = get_groww_client()
 
 if groww:
-    # Top Stock Underlyings
+    # Top stocks
     stock_map = {"RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10, "ICICIBANK": 10, "TCS": 20}
     
-    # 2026 Date Formatting
-    EXP_STR = "26FEB"  # 26 Feb Expiry
+    # 2026 Date format: DDMMM (e.g., 26FEB)
+    EXP_STR = "26FEB"  
     YR = "26"
 
-    if st.button("🚀 RUN SMART SCAN"):
+    if st.button("🔍 START SCAN"):
         results = []
-        status_log = []
+        errors = []
         
         for sym, step in stock_map.items():
             try:
-                # 1. Fetch Cash Price
+                # 1. Fetch Spot Price - Trying without 'NSE:' prefix first
+                # If this fails, try: trading_symbol=f"NSE:{sym}"
                 spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
                 ltp = spot_data.get('last_price', 0)
                 day_chg = spot_data.get('day_change_perc', 0)
@@ -47,42 +45,35 @@ if groww:
                     atm = get_atm(ltp, step)
                     opt_type = "CE" if day_chg >= 0 else "PE"
                     
-                    # Try Format A: RELIANCE26FEB2800CE
-                    opt_sym_a = f"{sym}{YR}{EXP_STR}{atm}{opt_type}"
-                    # Try Format B: RELIANCE26FEB262800CE (Some brokers repeat the year)
-                    opt_sym_b = f"{sym}{EXP_STR}{YR}{atm}{opt_type}"
-
-                    # Attempting to fetch premium
-                    opt_data = groww.get_quote(trading_symbol=opt_sym_a, exchange="NSE", segment="FNO")
-                    opt_ltp = opt_data.get('last_price', 0)
+                    # Constructing the exact symbol: e.g., RELIANCE26FEB2800CE
+                    # We will try both with and without the NSE: prefix
+                    opt_sym = f"{sym}{YR}{EXP_STR}{atm}{opt_type}"
                     
-                    # Fallback to Format B if A returns 0
-                    if not opt_ltp:
-                        opt_data = groww.get_quote(trading_symbol=opt_sym_b, exchange="NSE", segment="FNO")
-                        opt_ltp = opt_data.get('last_price', 0)
-                        final_sym = opt_sym_b
-                    else:
-                        final_sym = opt_sym_a
+                    # 2. Fetch Option Quote
+                    opt_data = groww.get_quote(trading_symbol=opt_sym, exchange="NSE", segment="FNO")
+                    opt_ltp = opt_data.get('last_price', 0)
 
                     results.append({
-                        "Stock": sym,
-                        "Spot": ltp,
-                        "Contract": final_sym,
-                        "Premium": opt_ltp if opt_ltp else "Pending",
-                        "Signal": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
-                        "Entry Rate": f"Above {round(opt_ltp * 1.05, 1)}" if opt_ltp else "Wait for Breakout"
+                        "STOCK": sym,
+                        "LTP": ltp,
+                        "OPTION": opt_sym,
+                        "PREMIUM": opt_ltp if opt_ltp else "No Data",
+                        "ACTION": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
+                        "ENTRY": f"Above {round(opt_ltp * 1.05, 1)}" if opt_ltp else "-"
                     })
                 else:
-                    status_log.append(f"Could not find Spot Price for {sym}")
+                    errors.append(f"{sym}: Could not get LTP (Check if symbol exists)")
 
             except Exception as e:
-                status_log.append(f"Error on {sym}: {str(e)}")
+                errors.append(f"{sym}: {str(e)}")
 
         if results:
             st.table(pd.DataFrame(results))
-        if status_log:
-            with st.expander("🔍 View Connection Logs"):
-                for log in status_log:
-                    st.write(log)
-else:
-    st.info("Awaiting API configuration in Streamlit Secrets.")
+        
+        if errors:
+            with st.expander("🛠️ Technical Error Logs"):
+                for err in errors:
+                    st.write(err)
+
+st.divider()
+st.info("💡 **Fixing 'Bad Request':** Ensure your Streamlit Secrets are correct. If Spot Price loads but F&O fails, your API token may not have Derivative (F&O) access.")
