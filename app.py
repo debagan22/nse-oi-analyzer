@@ -1,8 +1,18 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
 from growwapi import GrowwAPI
 
-st.set_page_config(page_title="Groww F&O Advisor", layout="wide")
+st.set_page_config(page_title="F&O Multi-Scanner", layout="wide")
+
+def get_next_tuesday():
+    """Calculates the upcoming Tuesday for Weekly Index Expiry."""
+    today = datetime.now()
+    days_ahead = (1 - today.weekday()) % 7 
+    if days_ahead == 0 and today.hour > 15: # If today is Tuesday after market close
+        days_ahead = 7
+    next_tue = today + timedelta(days_ahead)
+    return next_tue.strftime("%d%b").upper() # Format: 24FEB
 
 @st.cache_resource
 def get_groww_client():
@@ -12,72 +22,56 @@ def get_groww_client():
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"Auth Failed: {e}")
+        st.error(f"API Connection Failed: {e}")
         return None
 
-def get_atm(price, step):
-    return int(round(price / step) * step)
+st.title("🚀 Weekly & Monthly F&O Scanner")
 
-st.title("🎯 Groww F&O Option Advisor")
+# Config
+WEEKLY_EXP = get_next_tuesday() 
+MONTHLY_EXP = "24FEB" # NSE shifted monthly to last Tuesday in 2026
 
 groww = get_groww_client()
 
 if groww:
-    # Stock Map with Strike Steps
-    stock_map = {
-        "RELIANCE": 20, 
-        "SBIN": 5, 
-        "HDFCBANK": 10, 
-        "ICICIBANK": 10, 
-        "TCS": 20,
-        "INFY": 20,
-        "ITC": 5
+    # Adding Indices back with their unique steps
+    full_map = {
+        "NIFTY": {"step": 50, "exp": WEEKLY_EXP},
+        "BANKNIFTY": {"step": 100, "exp": WEEKLY_EXP},
+        "RELIANCE": {"step": 20, "exp": MONTHLY_EXP},
+        "SBIN": {"step": 5, "exp": MONTHLY_EXP},
+        "HDFCBANK": {"step": 10, "exp": MONTHLY_EXP}
     }
-    
-    # FORMAT: [Expiry Date] -> 26FEB
-    # Note: Groww typically uses DDMMM format for monthly
-    EXPIRY_LABEL = "26FEB" 
 
-    if st.button("🔍 SCAN LIVE OPTIONS"):
+    if st.button("🔍 SCAN ALL EXPIRIES"):
         results = []
-        
-        for sym, step in stock_map.items():
+        for sym, cfg in full_map.items():
             try:
-                # 1. Get Spot Price
-                spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
+                # 1. Get Spot
+                segment = "CASH" if sym not in ["NIFTY", "BANKNIFTY"] else "INDEX"
+                spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment=segment)
                 ltp = spot_data.get('last_price', 0)
-                day_chg = spot_data.get('day_change_perc', 0)
-
+                
                 if ltp > 0:
-                    atm = get_atm(ltp, step)
-                    opt_type = "CE" if day_chg >= 0 else "PE"
+                    atm = int(round(ltp / cfg['step']) * cfg['step'])
+                    opt_type = "CE" if spot_data.get('day_change_perc', 0) >= 0 else "PE"
                     
-                    # 2. Construct Symbol: [Underlying][Expiry][Strike][Type]
-                    # Example: RELIANCE26FEB2800CE
-                    opt_sym = f"{sym}{EXPIRY_LABEL}{atm}{opt_type}"
+                    # 2. Build Symbol: [Name][Expiry][Strike][Type]
+                    opt_sym = f"{sym}{cfg['exp']}{atm}{opt_type}"
                     
-                    # 3. Fetch Option Details
+                    # 3. Get Premium
                     opt_data = groww.get_quote(trading_symbol=opt_sym, exchange="NSE", segment="FNO")
                     opt_ltp = opt_data.get('last_price', 0)
-                    opt_oi = opt_data.get('oi_day_change_percentage', 0)
 
                     results.append({
-                        "STOCK": sym,
-                        "SPOT": ltp,
-                        "SUGGESTION": opt_sym,
-                        "PREMIUM": opt_ltp if opt_ltp else "Check Segment",
-                        "OI CHG %": f"{opt_oi if opt_oi else 0:.2f}%",
-                        "ACTION": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
-                        "ENTRY": f"Above {round(opt_ltp * 1.05, 1)}" if opt_ltp else "-"
+                        "Symbol": sym,
+                        "Type": "Weekly" if cfg['exp'] == WEEKLY_EXP else "Monthly",
+                        "Expiry": cfg['exp'],
+                        "Contract": opt_sym,
+                        "Premium": opt_ltp if opt_ltp else "No Quote",
+                        "Signal": "BULLISH 🟢" if opt_type == "CE" else "BEARISH 🔴"
                     })
-            except Exception as e:
-                st.sidebar.error(f"{sym} Error: {str(e)}")
+            except: continue
 
-        if results:
-            df = pd.DataFrame(results)
-            st.table(df)
-            st.success(f"Scanned {len(results)} stocks using {EXPIRY_LABEL} expiry.")
-        else:
-            st.warning("No data retrieved. Please verify if 26FEB is the correct string for your broker today.")
-
-st.divider()
+        st.table(pd.DataFrame(results))
+        st.caption(f"Note: Weekly Expiry detected as {WEEKLY_EXP}. Monthly as {MONTHLY_EXP}.")
