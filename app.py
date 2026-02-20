@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
 
-st.set_page_config(page_title="F&O Smart Advisor", layout="wide")
+st.set_page_config(page_title="Groww F&O Advisor", layout="wide")
 
 @st.cache_resource
 def get_groww_client():
@@ -18,25 +18,32 @@ def get_groww_client():
 def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🎯 Pro Stock Options Advisor")
+st.title("🎯 Groww F&O Option Advisor")
+
 groww = get_groww_client()
 
 if groww:
-    # Top stocks
-    stock_map = {"RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10, "ICICIBANK": 10, "TCS": 20}
+    # Stock Map with Strike Steps
+    stock_map = {
+        "RELIANCE": 20, 
+        "SBIN": 5, 
+        "HDFCBANK": 10, 
+        "ICICIBANK": 10, 
+        "TCS": 20,
+        "INFY": 20,
+        "ITC": 5
+    }
     
-    # 2026 Date format: DDMMM (e.g., 26FEB)
-    EXP_STR = "26FEB"  
-    YR = "26"
+    # FORMAT: [Expiry Date] -> 26FEB
+    # Note: Groww typically uses DDMMM format for monthly
+    EXPIRY_LABEL = "26FEB" 
 
-    if st.button("🔍 START SCAN"):
+    if st.button("🔍 SCAN LIVE OPTIONS"):
         results = []
-        errors = []
         
         for sym, step in stock_map.items():
             try:
-                # 1. Fetch Spot Price - Trying without 'NSE:' prefix first
-                # If this fails, try: trading_symbol=f"NSE:{sym}"
+                # 1. Get Spot Price
                 spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
                 ltp = spot_data.get('last_price', 0)
                 day_chg = spot_data.get('day_change_perc', 0)
@@ -45,35 +52,32 @@ if groww:
                     atm = get_atm(ltp, step)
                     opt_type = "CE" if day_chg >= 0 else "PE"
                     
-                    # Constructing the exact symbol: e.g., RELIANCE26FEB2800CE
-                    # We will try both with and without the NSE: prefix
-                    opt_sym = f"{sym}{YR}{EXP_STR}{atm}{opt_type}"
+                    # 2. Construct Symbol: [Underlying][Expiry][Strike][Type]
+                    # Example: RELIANCE26FEB2800CE
+                    opt_sym = f"{sym}{EXPIRY_LABEL}{atm}{opt_type}"
                     
-                    # 2. Fetch Option Quote
+                    # 3. Fetch Option Details
                     opt_data = groww.get_quote(trading_symbol=opt_sym, exchange="NSE", segment="FNO")
                     opt_ltp = opt_data.get('last_price', 0)
+                    opt_oi = opt_data.get('oi_day_change_percentage', 0)
 
                     results.append({
                         "STOCK": sym,
-                        "LTP": ltp,
-                        "OPTION": opt_sym,
-                        "PREMIUM": opt_ltp if opt_ltp else "No Data",
+                        "SPOT": ltp,
+                        "SUGGESTION": opt_sym,
+                        "PREMIUM": opt_ltp if opt_ltp else "Check Segment",
+                        "OI CHG %": f"{opt_oi if opt_oi else 0:.2f}%",
                         "ACTION": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
                         "ENTRY": f"Above {round(opt_ltp * 1.05, 1)}" if opt_ltp else "-"
                     })
-                else:
-                    errors.append(f"{sym}: Could not get LTP (Check if symbol exists)")
-
             except Exception as e:
-                errors.append(f"{sym}: {str(e)}")
+                st.sidebar.error(f"{sym} Error: {str(e)}")
 
         if results:
-            st.table(pd.DataFrame(results))
-        
-        if errors:
-            with st.expander("🛠️ Technical Error Logs"):
-                for err in errors:
-                    st.write(err)
+            df = pd.DataFrame(results)
+            st.table(df)
+            st.success(f"Scanned {len(results)} stocks using {EXPIRY_LABEL} expiry.")
+        else:
+            st.warning("No data retrieved. Please verify if 26FEB is the correct string for your broker today.")
 
 st.divider()
-st.info("💡 **Fixing 'Bad Request':** Ensure your Streamlit Secrets are correct. If Spot Price loads but F&O fails, your API token may not have Derivative (F&O) access.")
