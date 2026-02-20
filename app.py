@@ -4,8 +4,10 @@ from growwapi import GrowwAPI
 from datetime import datetime, timedelta
 import io
 
-st.set_page_config(page_title="Pro F&O Advisor", layout="wide")
+# 1. Page Setup
+st.set_page_config(page_title="F&O Signal Machine", layout="wide", page_icon="🏹")
 
+# 2. Connection Logic
 @st.cache_resource
 def get_groww_client():
     try:
@@ -14,103 +16,105 @@ def get_groww_client():
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"Auth Error: {e}")
+        st.error(f"❌ API Connection Failed: {e}")
         return None
 
+# 3. Fetch Full F&O List (Cloud-Safe)
 @st.cache_data
-def fetch_fo_list_safe():
+def get_full_fo_list():
     try:
         url = "https://groww.in/api/v1/fno/instruments/master/csv"
         df = pd.read_csv(url)
-        fo_stocks = df[df['segment'] == 'FNO']['underlying_symbol'].unique().tolist()
-        return [s for s in fo_stocks if str(s) != 'nan']
+        # Filters only unique underlying stocks in the F&O segment
+        fo_list = df[df['segment'] == 'FNO']['underlying_symbol'].unique().tolist()
+        return [s for s in fo_list if str(s) != 'nan']
     except:
-        return ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "SBIN", "INFY", "TCS"]
+        return ["NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "SBIN", "INFY", "TCS", "ITC"]
 
-# --- Logic: Trade Math ---
-def calculate_trade_params(symbol, ltp, price_chg, oi_chg):
-    # Determine Signal
-    if price_chg > 0 and oi_chg > 0:
-        sig, col, sl_pct, tgt_pct = "BUY (Long Buildup)", "#d4edda", 0.99, 1.02
-    elif price_chg < 0 and oi_chg > 0:
-        sig, col, sl_pct, tgt_pct = "SELL (Short Buildup)", "#f8d7da", 1.01, 0.98
-    elif price_chg > 0 and oi_chg < 0:
-        sig, col, sl_pct, tgt_pct = "BUY (Short Covering)", "#d1ecf1", 0.992, 1.015
-    elif price_chg < 0 and oi_chg < 0:
-        sig, col, sl_pct, tgt_pct = "SELL (Long Unwinding)", "#fff3cd", 1.008, 0.985
-    else:
-        return None
+# 4. Suggestion Logic (Price & OI Buildup)
+def generate_trade_plan(symbol, ltp, p_chg, oi_chg):
+    # Buffer for Entry: 0.15% for momentum confirmation
+    # Target: 1.5% | Stop Loss: 0.8%
+    if p_chg > 0.4 and oi_chg > 2.0:
+        return {
+            "Action": "BUY (Long Buildup)", 
+            "Entry": round(ltp * 1.0015, 2), 
+            "SL": round(ltp * 0.992, 2), 
+            "Target": round(ltp * 1.015, 2),
+            "Color": "#d4edda" # Green
+        }
+    elif p_chg < -0.4 and oi_chg > 2.0:
+        return {
+            "Action": "SELL (Short Buildup)", 
+            "Entry": round(ltp * 0.9985, 2), 
+            "SL": round(ltp * 1.008, 2), 
+            "Target": round(ltp * 0.985, 2),
+            "Color": "#f8d7da" # Red
+        }
+    elif p_chg > 0.4 and oi_chg < -2.0:
+        return {
+            "Action": "BUY (Short Covering)", 
+            "Entry": ltp, "SL": round(ltp * 0.994, 2), "Target": round(ltp * 1.01, 2),
+            "Color": "#d1ecf1" # Blue
+        }
+    return None
 
-    return {
-        "Symbol": symbol,
-        "LTP": round(ltp, 2),
-        "Signal": sig,
-        "Stop Loss": round(ltp * sl_pct, 2),
-        "Target": round(ltp * tgt_pct, 2),
-        "Color": col
-    }
-
-st.title("🏹 Pro F&O Trade Advisor")
+# --- UI Layout ---
+st.title("🎯 Live F&O Signal Machine")
+st.markdown("Automated scan for **Long/Short Buildups** with entry prices.")
 
 groww = get_groww_client()
 
 if groww:
-    # --- Sidebar Search & Filters ---
-    st.sidebar.header("Filter Options")
-    search_query = st.sidebar.text_input("🔍 Search Stock (e.g. RELIANCE)", "").upper()
-    scan_limit = st.sidebar.slider("Number of stocks to scan", 10, 100, 30)
+    # Sidebar Filters
+    st.sidebar.header("Scanner Settings")
+    search = st.sidebar.text_input("🔍 Search Stock", "").upper()
+    scan_limit = st.sidebar.slider("Scan Depth", 10, 150, 40)
     
-    fo_watchlist = fetch_fo_list_safe()
-    # Filter watchlist based on search
-    if search_query:
-        fo_watchlist = [s for s in fo_watchlist if search_query in s]
-    
-    if st.button("🚀 Generate Trade Signals"):
+    fo_master = get_full_fo_list()
+    watchlist = [s for s in fo_master if search in s] if search else fo_master[:scan_limit]
+
+    if st.button("🚀 Start Full Market Scan"):
         results = []
-        progress = st.progress(0)
+        bar = st.progress(0)
+        status = st.empty()
         
-        for i, symbol in enumerate(fo_watchlist[:scan_limit]):
+        for i, sym in enumerate(watchlist):
             try:
-                data = groww.get_quote(exchange="NSE", segment="FNO", trading_symbol=symbol)
+                data = groww.get_quote(exchange="NSE", segment="FNO", trading_symbol=sym)
                 ltp = data.get('last_price', 0)
                 
-                # EOD Fallback if market closed
-                if ltp == 0:
-                    hist = groww.get_historical_candle_data(symbol, "NSE", "1D", 
-                           (datetime.now()-timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S"), 
-                           datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    candles = hist.get('candles', [])
-                    if len(candles) >= 2:
-                        ltp = candles[-1][4]
-                        price_chg = ((candles[-1][4] - candles[-2][4]) / candles[-2][4]) * 100
-                        oi_chg = 1.0 # Static placeholder for EOD OI
-                    else: continue
-                else:
-                    price_chg = data.get('day_change_perc', 0)
+                # Check if market is open
+                if ltp > 0:
+                    p_chg = data.get('day_change_perc', 0)
                     oi_chg = data.get('oi_day_change_percentage', 0)
-
-                trade = calculate_trade_params(symbol, ltp, price_chg, oi_chg)
-                if trade: results.append(trade)
+                    plan = generate_trade_plan(sym, ltp, p_chg, oi_chg)
+                    
+                    if plan:
+                        results.append({
+                            "Symbol": sym, "LTP": ltp, "Action": plan['Action'],
+                            "Entry Above/Below": plan['Entry'], "Stop Loss": plan['SL'],
+                            "Target": plan['Target'], "Color": plan['Color']
+                        })
+                else:
+                    status.info("🌙 Market is Closed. Please check back during NSE hours (9:15 - 3:30).")
+                    break
             except: continue
-            progress.progress((i + 1) / len(fo_watchlist[:scan_limit]))
+            bar.progress((i + 1) / len(watchlist))
 
+        # --- Show Results ---
         if results:
             df = pd.DataFrame(results)
+            st.subheader("📊 Found Trading Opportunities")
             
-            # --- Display Results ---
-            st.subheader("🎯 Daily Trade Plan")
-            st.dataframe(df.style.apply(lambda x: [f'background-color: {x.Color}'] * len(x), axis=1).hide(axis='index'), use_container_width=True)
+            # Highlight Rows based on Action
+            st.table(df.style.apply(lambda x: [f'background-color: {x.Color}'] * len(x), axis=1))
             
-            # --- Download Button ---
+            # Export
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Trade Report (CSV)",
-                data=csv,
-                file_name=f"FO_Signals_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime='text/csv',
-            )
+            st.download_button("📥 Download Trade Sheet", csv, "trades.csv", "text/csv")
         else:
-            st.warning("No actionable signals found for the selected stocks.")
+            st.warning("No high-conviction signals found. Try increasing Scan Depth.")
 
 else:
-    st.info("Awaiting API Connection...")
+    st.info("Please set up your Groww API Keys in Streamlit Settings.")
