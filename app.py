@@ -1,68 +1,59 @@
 import streamlit as st
 import pandas as pd
-import requests
-import io
-import zipfile
-from datetime import datetime, timedelta
+from growwapi import GrowwAPI
 
-def get_latest_fno_data():
-    session = requests.Session()
-    # Comprehensive headers to look like a real browser
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Referer': 'https://www.nseindia.com/all-reports-derivatives'
-    }
-    
-    # Try to fetch for the last 3 working days
-    for i in range(1, 4):
-        target_date = datetime.now() - timedelta(days=i)
-        if target_date.weekday() >= 5: continue # Skip Sat/Sun
+# 1. Setup Page
+st.set_page_config(page_title="Groww Option Advisor", layout="wide")
+
+# 2. Authentication (Automated)
+@st.cache_resource
+def get_groww_client():
+    try:
+        api_key = st.secrets["GROWW_API_KEY"]
+        api_secret = st.secrets["GROWW_API_SECRET"]
         
-        d, m, y = target_date.strftime("%d"), target_date.strftime("%b").upper(), target_date.strftime("%Y")
-        url = f"https://archives.nseindia.com/content/historical/DERIVATIVES/{y}/{m}/fo{d}{m}{y}bhav.csv.zip"
+        # Groww requires a daily access token
+        access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
+        return GrowwAPI(access_token)
+    except Exception as e:
+        st.error(f"Failed to log in to Groww: {e}")
+        return None
+
+groww = get_groww_client()
+
+if groww:
+    st.title("🟢 Groww F&O Suggestion Engine")
+    
+    # 3. User Interface
+    col1, col2 = st.columns(2)
+    with col1:
+        symbol = st.selectbox("Underlying Asset", ["NIFTY", "BANKNIFTY", "RELIANCE"])
+    with col2:
+        # Today is Feb 20, 2026. Next weekly expiry is likely Feb 26.
+        expiry = st.text_input("Expiry (YYYY-MM-DD)", value="2026-02-26")
+
+    if st.button("Generate Suggestions"):
+        # 4. Fetch Option Chain
+        chain = groww.get_option_chain(exchange="NSE", underlying=symbol, expiry_date=expiry)
+        df = pd.DataFrame(chain['strikes'])
+
+        # 5. Logic: Calculate Put-Call Ratio (PCR)
+        total_pe_oi = df['pe_open_interest'].sum()
+        total_ce_oi = df['ce_open_interest'].sum()
+        pcr = total_pe_oi / total_ce_oi
+
+        # 6. Suggestions
+        st.subheader(f"Market Sentiment: {'Bullish' if pcr > 1.1 else 'Bearish' if pcr < 0.8 else 'Neutral'}")
         
-        try:
-            # Visit home page first to get cookies
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            response = session.get(url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                    return pd.read_csv(z.open(z.namelist()[0])), target_date
-        except: continue
-    return None, None
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+        metric_col1.metric("Current PCR", f"{pcr:.2f}")
+        metric_col2.metric("Resistance (Max CE OI)", f"{df.loc[df['ce_open_interest'].idxmax(), 'strike_price']}")
+        metric_col3.metric("Support (Max PE OI)", f"{df.loc[df['pe_open_interest'].idxmax(), 'strike_price']}")
 
-st.set_page_config(page_title="NSE F&O Analyzer", layout="wide")
-st.title("🛡️ NSE OI Suggestion Engine")
-
-# --- DATA LOADING ---
-data, found_date = get_latest_fno_data()
-
-# Sidebar fallback
-st.sidebar.header("Data Control")
-manual_file = st.sidebar.file_uploader("Backup: Upload Bhavcopy (zip/csv)", type=["zip", "csv"])
-
-if manual_file:
-    if manual_file.name.endswith('.zip'):
-        with zipfile.ZipFile(manual_file) as z:
-            data = pd.read_csv(z.open(z.namelist()[0]))
-    else:
-        data = pd.read_csv(manual_file)
-    found_date = "Manual Upload"
-
-# --- ANALYSIS SECTION ---
-if data is not None:
-    st.success(f"Data Source: {found_date}")
-    data.columns = [c.strip() for c in data.columns] # Clean spaces
-    
-    # Simple OI Logic for Suggestion
-    # Long Buildup = Price Up + OI Up
-    buildup = data[(data['CHG_IN_OI'] > 0) & (data['CLOSE'] > data['OPEN'])]
-    
-    st.subheader("💡 Buy Suggestions (Long Buildup)")
-    st.dataframe(buildup[['SYMBOL', 'STRIKE_PR', 'OPTION_TYP', 'CLOSE', 'CHG_IN_OI']].sort_values(by='CHG_IN_OI', ascending=False).head(10))
-else:
-    st.error("❌ Auto-fetch blocked by NSE Firewall.")
-    st.info("To fix this now: Download the 'Bhavcopy (csv.zip)' from the link below and upload it here.")
-    st.markdown("[Go to NSE Daily Reports](https://www.nseindia.com/all-reports-derivatives)")
+        # Actionable Suggestions
+        if pcr > 1.2:
+            st.success("🎯 SUGGESTION: BUY CALL at Support. High Put writing indicates strong floor.")
+        elif pcr < 0.7:
+            st.error("🎯 SUGGESTION: BUY PUT at Resistance. High Call writing indicates strong ceiling.")
+        else:
+            st.warning("🎯 SUGGESTION: WAIT. PCR is neutral; market may be sideways.")
