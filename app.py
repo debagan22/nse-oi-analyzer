@@ -1,22 +1,11 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-import pytz
+from datetime import datetime, timedelta
 from growwapi import GrowwAPI
-
-# --- Market Timing Helper ---
-def is_market_open():
-    tz = pytz.timezone('Asia/Kolkata')
-    now = datetime.now(tz)
-    # Weekends
-    if now.weekday() >= 5: return False
-    # Market Hours (9:15 AM to 3:30 PM)
-    start = now.replace(hour=9, minute=15, second=0)
-    end = now.replace(hour=15, minute=30, second=0)
-    return start <= now <= end
 
 @st.cache_resource
 def get_groww_client():
+    # Ensure your API key has the "Live Data" or "Historical Data" subscription active
     try:
         api_key = st.secrets["GROWW_API_KEY"]
         api_secret = st.secrets["GROWW_API_SECRET"]
@@ -25,63 +14,65 @@ def get_groww_client():
     except Exception as e:
         return None
 
-def get_price(groww, sym, segment="CASH"):
-    """Fetches Live price if open, else fetches the last EOD candle."""
-    if is_market_open():
-        data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment=segment)
-        return data.get('last_price', 0), "LIVE"
-    else:
-        # Fallback to last historical candle (EOD)
-        try:
-            # Note: Stock EOD usually uses 'NSE-SYMBOL' format in Groww
-            hist = groww.get_historical_candles(
-                exchange="NSE", 
-                segment=segment, 
-                groww_symbol=f"NSE-{sym}" if segment=="CASH" else sym,
-                candle_interval="5" 
-            )
-            if hist:
-                return hist[-1][4], "EOD" # Index 4 is usually 'Close'
-        except: pass
-    return 0, "OFFLINE"
+def get_eod_price(groww, sym, segment="CASH", is_option=False, strike=None, opt_type=None):
+    """
+    Constructs the specific 'Groww Symbol' required for historical data.
+    Format: NSE-RELIANCE-24Feb26-2800-CE
+    """
+    try:
+        # Construct Groww-specific historical symbol
+        if is_option:
+            # Note the case: Feb (Mixed case) is often used in Groww historical strings
+            g_sym = f"NSE-{sym}-24Feb26-{strike}-{opt_type}"
+        else:
+            g_sym = f"NSE-{sym}"
 
-# --- Main App ---
-st.title("🎯 Hybrid F&O Scanner (Live/EOD)")
-m_status = "🟢 OPEN" if is_market_open() else "🔴 CLOSED"
-st.subheader(f"Market Status: {m_status}")
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        start_time = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
 
+        candles = groww.get_historical_candles(
+            exchange="NSE",
+            segment=segment,
+            groww_symbol=g_sym,
+            start_time=start_time,
+            end_time=end_time,
+            candle_interval="day" # Use day candle for stable EOD data
+        )
+        if candles and len(candles) > 0:
+            return candles[-1][4] # Closing price
+    except:
+        return 0
+    return 0
+
+st.title("🎯 F&O Recovery Scanner")
 groww = get_groww_client()
-EXPIRY = "24FEB" # NSE Monthly
 
 if groww:
     stocks = {"RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10}
     
-    if st.button("🔍 SCAN NOW"):
+    if st.button("🔍 FETCH LAST CLOSING DATA"):
         results = []
         for sym, step in stocks.items():
-            # 1. Get Spot (Live or EOD)
-            spot_price, source = get_price(groww, sym, "CASH")
+            # 1. Get Spot EOD
+            spot = get_eod_price(groww, sym, segment="CASH")
             
-            if spot_price > 0:
-                atm = int(round(spot_price / step) * step)
-                opt_sym = f"{sym} {EXPIRY} {atm} CE" # Using space format
+            if spot > 0:
+                strike = int(round(spot / step) * step)
+                opt_type = "CE" # Defaulting for scan
                 
-                # 2. Get Option Price
-                opt_price, _ = get_price(groww, opt_sym, "FNO")
+                # 2. Get Option EOD
+                opt_price = get_eod_price(groww, sym, "FNO", True, strike, opt_type)
                 
                 if opt_price > 0:
                     results.append({
                         "STOCK": sym,
-                        "SPOT": spot_price,
-                        "DATA TYPE": source,
-                        "OPTION": opt_sym,
-                        "PREMIUM": opt_price,
-                        "ENTRY": round(opt_price * 1.05, 1),
-                        "EXIT (TARGET)": round(opt_price * 1.30, 1),
-                        "STOP-LOSS": round(opt_price * 0.85, 1)
+                        "LAST SPOT": spot,
+                        "CONTRACT": f"{sym} 24FEB {strike} {opt_type}",
+                        "LAST PREMIUM": opt_price,
+                        "PLAN ENTRY": round(opt_price * 1.05, 1)
                     })
         
         if results:
             st.table(pd.DataFrame(results))
         else:
-            st.warning("Could not fetch data. Check API subscription or symbol format.")
+            st.error("Still no data. Please verify: 1. You paid the ₹499 API subscription. 2. F&O is active in your Groww App.")
