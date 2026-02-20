@@ -18,10 +18,11 @@ def get_groww_client():
 def get_atm(price, step):
     return int(round(price / step) * step)
 
-st.title("🏹 NSE Stock Option Advisor (24-Feb Expiry)")
+st.title("🏹 NSE Stock Option Advisor (24-Feb-26)")
 
-# Updated to match NSE/Groww Tuesday Expiry for Feb 2026
-EXPIRY = "24FEB"
+# The standardized Groww format for Monthly 2026 Expiry
+# Format: DDMMMYY -> 24FEB26
+EXPIRY_LABEL = "24FEB26"
 
 groww = get_groww_client()
 
@@ -44,7 +45,9 @@ if groww:
                 if ltp > 0:
                     atm = get_atm(ltp, step)
                     opt_type = "CE" if p_chg >= 0 else "PE"
-                    opt_sym = f"{sym}{EXPIRY}{atm}{opt_type}"
+                    
+                    # Correct Symbol: RELIANCE24FEB262800CE
+                    opt_sym = f"{sym}{EXPIRY_LABEL}{atm}{opt_type}"
                     
                     # 2. Get Option Data
                     opt_data = groww.get_quote(trading_symbol=opt_sym, exchange="NSE", segment="FNO")
@@ -66,6 +69,4 @@ if groww:
         if results:
             st.table(pd.DataFrame(results))
         else:
-            st.warning("No data found. Ensure you are using the correct 24FEB symbol format.")
-
-st.info("💡 **Note:** NSE Stock F&O now expires on the last Tuesday of the month (Feb 24, 2026).")
+            st.warning(f"Still no data. Tried symbol format like: {stock_map.keys().__iter__().__next__()}24FEB26...")
