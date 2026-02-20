@@ -2,82 +2,78 @@ import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
 
-st.set_page_config(page_title="F&O Diagnostics", layout="wide")
+st.set_page_config(page_title="F&O Stock Advisor", layout="wide")
+
+# --- AUTO-CONFIG FOR EXPIRY ---
+EXP_STR = "26FEB"  
+YR = "26"      
 
 @st.cache_resource
 def get_groww_client():
     try:
         if "GROWW_API_KEY" not in st.secrets:
-            st.error("🔑 Secrets missing: Add GROWW_API_KEY and GROWW_API_SECRET to Streamlit.")
+            st.error("Missing GROWW_API_KEY in Secrets.")
             return None
         api_key = st.secrets["GROWW_API_KEY"]
         api_secret = st.secrets["GROWW_API_SECRET"]
+        # This function handles the daily token handshake
         access_token = GrowwAPI.get_access_token(api_key=api_key, secret=api_secret)
         return GrowwAPI(access_token)
     except Exception as e:
-        st.error(f"❌ Auth Failed: {e}")
+        st.error(f"Auth Failed: {e}")
         return None
 
-st.title("🏹 High-Sensitivity F&O Scanner")
+def get_atm(price, step):
+    return int(round(price / step) * step)
+
+st.title("🏹 F&O Option Suggestor")
 groww = get_groww_client()
 
-# CONFIG - Note: For 26 Feb Expiry, the code must match broker's string
-EXP_STR = "26FEB" 
-YR = "26"
-
 if groww:
-    # A smaller, simplified list to test connectivity
-    test_stocks = {"RELIANCE": 20, "SBIN": 5, "HDFCBANK": 10}
+    # Dictionary of stocks and their strike steps
+    stock_map = {
+        "RELIANCE": 20, "HDFCBANK": 10, "SBIN": 5, 
+        "ICICIBANK": 10, "INFY": 20, "TCS": 20, "ITC": 5
+    }
     
-    if st.button("🚀 Run Live Diagnostics"):
+    if st.button("🚀 SCAN LIVE STOCKS"):
         results = []
-        status_col = st.columns(1)[0]
+        progress = st.progress(0)
         
-        for sym, step in test_stocks.items():
+        for i, (sym, step) in enumerate(stock_map.items()):
             try:
-                # STEP 1: Get Spot Price (Use CASH segment)
-                # Some API versions require the prefix 'NSE:'
-                spot = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
-                ltp = spot.get('last_price', 0)
-                
+                # 1. Fetch Spot Price (CASH segment is usually always available)
+                spot_data = groww.get_quote(trading_symbol=sym, exchange="NSE", segment="CASH")
+                ltp = spot_data.get('last_price', 0)
+                day_chg = spot_data.get('day_change_perc', 0)
+
                 if ltp > 0:
-                    atm = int(round(ltp / step) * step)
-                    # STEP 2: Construct Option Symbol
-                    # Format: RELIANCE26FEB2800CE
-                    opt_sym = f"{sym}{YR}{EXP_STR}{atm}CE"
+                    atm = get_atm(ltp, step)
+                    opt_type = "CE" if day_chg >= 0 else "PE"
+                    # Constructing the exact symbol format for Groww
+                    opt_sym = f"{sym}{YR}{EXP_STR}{atm}{opt_type}"
                     
-                    # STEP 3: Get Option Quote
+                    # 2. Fetch Option Price (FNO segment)
                     opt_data = groww.get_quote(trading_symbol=opt_sym, exchange="NSE", segment="FNO")
                     opt_ltp = opt_data.get('last_price', 0)
                     
                     results.append({
                         "Stock": sym,
                         "Spot Price": ltp,
-                        "Contract": opt_sym,
-                        "Opt LTP": opt_ltp if opt_ltp else "No Premium Data",
-                        "Status": "✅ Success" if opt_ltp else "⚠️ No Opt Data"
+                        "Suggested Option": opt_sym,
+                        "Premium": opt_ltp if opt_ltp else "No F&O Data",
+                        "Action": "BUY CALL 🟢" if day_chg >= 0 else "BUY PUT 🔴",
+                        "Entry": f"Above {round(opt_ltp * 1.05, 1)}" if opt_ltp else "N/A"
                     })
-                else:
-                    st.sidebar.error(f"Failed to get price for {sym}. Response: {spot}")
             except Exception as e:
-                st.sidebar.warning(f"Error on {sym}: {e}")
                 continue
+            progress.progress((i + 1) / len(stock_map))
 
         if results:
-            st.dataframe(pd.DataFrame(results), use_container_width=True)
+            df = pd.DataFrame(results)
+            st.dataframe(df, use_container_width=True)
+            st.info("💡 If 'Premium' shows 'No F&O Data', your API key lacks Derivative permissions.")
         else:
-            st.error("Total Failure: No data returned for any symbols. See Sidebar for errors.")
+            st.warning("No data returned. Check API status.")
 
----
-
-### 🔍 Top 3 Reasons for "No Data" Today:
-
-1.  **The Symbol String Mismatch:** Brokers change their naming slightly. In 2026, some APIs require `NSE:RELIANCE26FEB2800CE` (with a colon) or `RELIANCE262262800CE` (using the day in numbers). If the string is off by one character, it returns "No Data."
-
-2.  **API Permissions (F&O Activation):**
-    Even if you can trade in the Groww app, your **API User** might not have "Derivative Data" permissions enabled. You can check this by trying to fetch `segment="CASH"`—if Cash works but `segment="FNO"` fails, your API is restricted.
-
-3.  **Token Expiry:**
-    Groww access tokens usually expire every 24 hours. If your app has been running for more than a day, you must **Re-deploy** or **Refresh** to trigger a new `access_token` generation.
-
-**Would you like me to add a "Raw Response Viewer" so we can see the exact JSON text the broker is sending back to find the exact error code?**
+st.divider()
