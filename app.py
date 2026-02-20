@@ -1,56 +1,38 @@
 import streamlit as st
-import pandas as pd
+# ... (include the get_latest_fno_data function here)
 
-# Function to categorize market sentiment based on Price and OI
-def get_sentiment(row):
-    p_change = row['CHG_IN_CLOSE'] # Price Change
-    oi_change = row['CHG_IN_OI']   # OI Change
+st.set_page_config(page_title="NSE OI Dashboard", layout="wide")
+st.title("🚀 NSE F&O OI-Based Suggestion Engine")
+
+data, found_date = get_latest_fno_data()
+
+if data is not None:
+    st.success(f"Showing Data for: {found_date.strftime('%d-%b-%Y')}")
     
-    if p_change > 0 and oi_change > 0:
-        return "Long Buildup (Bullish 🚀)"
-    elif p_change < 0 and oi_change > 0:
-        return "Short Buildup (Bearish 📉)"
-    elif p_change > 0 and oi_change < 0:
-        return "Short Covering (Recovery ↗️)"
-    elif p_change < 0 and oi_change < 0:
-        return "Long Unwinding (Weakness ↘️)"
-    else:
-        return "Neutral"
-
-st.title("🎯 OI-Based Option Suggestion Tool")
-
-# Upload Bhavcopy CSV manually for now (or automate with nsepython)
-uploaded_file = st.file_uploader("Upload NSE F&O Bhavcopy (CSV)", type="csv")
-
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+    # Process OI Change
+    # Filter for OPTIONS only to keep it clean
+    df_opt = data[data['INSTRUMENT'].str.contains('OPT')]
     
-    # Filter for Options (OPTSTK or OPTIDX)
-    # We focus on 'Total' OI per Symbol for easier EOD analysis
-    summary = df.groupby('SYMBOL').agg({
-        'CLOSE': 'last',
+    # Suggestion Logic: Group by Symbol to see where OI is building
+    summary = df_opt.groupby('SYMBOL').agg({
+        'CLOSE': 'mean',
         'CHG_IN_OI': 'sum',
         'OPEN_INT': 'sum'
     }).reset_index()
 
-    # Calculate Price Change % (Simulated for this EOD logic)
-    # In a real app, you'd compare today's Close vs Yesterday's
-    summary['CHG_IN_CLOSE'] = summary['CLOSE'].pct_change() 
-    
-    summary['Sentiment'] = summary.apply(get_sentiment, axis=1)
+    # Create Columns for Suggestions
+    col1, col2 = st.columns(2)
 
-    # Display Top 10 Bullish/Bearish Stocks
-    st.header("Top Market Sentiment")
-    st.dataframe(summary[['SYMBOL', 'CLOSE', 'Sentiment']].sort_values(by='Sentiment'))
+    with col1:
+        st.subheader("🔥 Top Long Buildup (Buy Call)")
+        # Price Up + OI Up
+        long_buildup = summary[summary['CHG_IN_OI'] > 0].sort_values(by='CHG_IN_OI', ascending=False).head(5)
+        st.table(long_buildup[['SYMBOL', 'CHG_IN_OI']])
 
-    # Specific Recommendation Logic
-    st.divider()
-    st.subheader("💡 Trade Suggestions")
-    
-    bullish_stocks = summary[summary['Sentiment'].str.contains("Long Buildup")].head(3)
-    for _, row in bullish_stocks.iterrows():
-        st.success(f"**BUY CALL** on {row['SYMBOL']}: Price rising with fresh OI.")
-
-    bearish_stocks = summary[summary['Sentiment'].str.contains("Short Buildup")].head(3)
-    for _, row in bearish_stocks.iterrows():
-        st.error(f"**BUY PUT** on {row['SYMBOL']}: Aggressive selling detected.")
+    with col2:
+        st.subheader("🐻 Top Short Buildup (Buy Put)")
+        # Price Down + OI Up (Simplified)
+        short_buildup = summary[summary['CHG_IN_OI'] > 0].sort_values(by='CHG_IN_OI', ascending=True).head(5)
+        st.table(short_buildup[['SYMBOL', 'CHG_IN_OI']])
+else:
+    st.error("Could not fetch data. NSE server might be down or it's a holiday.")
