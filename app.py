@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 from growwapi import GrowwAPI
+from datetime import datetime, timedelta
 import time
 
-st.set_page_config(page_title="Live F&O Scanner", layout="wide")
+st.set_page_config(page_title="24/7 F&O Advisor", layout="wide")
 
 @st.cache_resource
 def get_groww_client():
@@ -18,75 +19,80 @@ def get_groww_client():
 
 groww = get_groww_client()
 
-# A list of high-liquidity F&O stocks. 
-# You can expand this to all 180+ stocks once you verify speed.
-FO_WATCHLIST = [
-    "NIFTY", "BANKNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", 
-    "INFY", "TCS", "TATASTEEL", "ADANIENT", "ITC", "BHARTIARTL"
-]
+# --- Helper: Get Build-up Signal ---
+def get_signal(price_chg, oi_chg):
+    if price_chg > 0 and oi_chg > 0: return "BUY (Long Buildup)", "#d4edda"
+    if price_chg < 0 and oi_chg > 0: return "SELL (Short Buildup)", "#f8d7da"
+    if price_chg > 0 and oi_chg < 0: return "BUY (Short Covering)", "#d1ecf1"
+    if price_chg < 0 and oi_chg < 0: return "SELL (Long Unwinding)", "#fff3cd"
+    return "Neutral", "#ffffff"
 
-st.title("🏹 Live F&O Buy/Sell Advisor")
+st.title("🏹 Universal F&O Buy/Sell Advisor")
 
 if groww:
-    if st.button("🚀 Start Live Market Scan"):
+    # 1. Load F&O List Automatically
+    @st.cache_data(ttl=3600)
+    def fetch_fo_list():
+        all_instruments = groww.get_all_instruments()
+        # Filter for FNO segment and unique underlying symbols
+        fo_df = all_instruments[all_instruments['segment'] == 'FNO']
+        return fo_df['underlying_symbol'].unique().tolist()
+
+    fo_watchlist = fetch_fo_list()[:30] # Scanning top 30 for speed
+    
+    status_placeholder = st.empty()
+    if st.button("🚀 Analyze Market"):
         results = []
         progress = st.progress(0)
         
-        for i, stock in enumerate(FO_WATCHLIST):
+        for i, symbol in enumerate(fo_watchlist):
             try:
-                # Fetching snapshot with OI data
-                snap = groww.get_quote(exchange="NSE", segment="FNO", trading_symbol=stock)
+                # Attempt Live Data
+                data = groww.get_quote(exchange="NSE", segment="FNO", trading_symbol=symbol)
+                ltp = data.get('last_price', 0)
                 
-                ltp = snap.get('last_price', 0)
-                price_chg = snap.get('day_change_perc', 0)
-                oi_chg = snap.get('oi_day_change_percentage', 0)
-
-                # --- AI STRATEGY LOGIC ---
-                if price_chg > 0.5 and oi_chg > 2:
-                    signal = "BUY (Long Buildup)"
-                    rate = f"Above {round(ltp * 1.002, 2)}" # Entry slightly above LTP
-                    color = "#d4edda" # Green
-                elif price_chg < -0.5 and oi_chg > 2:
-                    signal = "SELL (Short Buildup)"
-                    rate = f"Below {round(ltp * 0.998, 2)}" # Entry slightly below LTP
-                    color = "#f8d7da" # Red
-                elif price_chg > 0.5 and oi_chg < -2:
-                    signal = "BUY (Short Covering)"
-                    rate = f"At Market ({ltp})"
-                    color = "#d1ecf1" # Blue
-                elif price_chg < -0.5 and oi_chg < -2:
-                    signal = "SELL (Long Unwinding)"
-                    rate = f"At Market ({ltp})"
-                    color = "#fff3cd" # Yellow
+                # Check if market is closed (LTP is 0 or price change is null)
+                if ltp == 0:
+                    status_placeholder.info("🌙 Market Closed: Computing EOD Analysis...")
+                    # Fetch last 2 days of daily candles to calculate change
+                    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    start_time = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    hist = groww.get_historical_candle_data(
+                        trading_symbol=symbol,
+                        exchange="NSE",
+                        interval="1D",
+                        start_time=start_time,
+                        end_time=end_time
+                    )
+                    candles = hist.get('candles', [])
+                    if len(candles) >= 2:
+                        last_close = candles[-1][4]  # Close price of latest candle
+                        prev_close = candles[-2][4]  # Close price of previous candle
+                        ltp = last_close
+                        price_chg = ((last_close - prev_close) / prev_close) * 100
+                        # Note: EOD OI change usually requires specialized OI history API
+                        oi_chg = 0 # Placeholder if EOD OI is restricted
+                    else: continue
                 else:
-                    signal = "WAIT (Neutral)"
-                    rate = "N/A"
-                    color = "#ffffff"
+                    status_placeholder.success("☀️ Market Open: Real-Time Analysis...")
+                    price_chg = data.get('day_change_perc', 0)
+                    oi_chg = data.get('oi_day_change_percentage', 0)
 
+                signal, color = get_signal(price_chg, oi_chg)
                 results.append({
-                    "Stock": stock,
+                    "Symbol": symbol,
                     "LTP": ltp,
                     "Price %": f"{price_chg:.2f}%",
                     "OI %": f"{oi_chg:.2f}%",
                     "Signal": signal,
-                    "Entry Rate": rate,
+                    "Entry Rate": f"At {ltp}",
                     "Color": color
                 })
-            except:
-                continue
-            progress.progress((i + 1) / len(FO_WATCHLIST))
+            except: continue
+            progress.progress((i + 1) / len(fo_watchlist))
 
-        # --- DISPLAY AS STYLED TABLE ---
         df = pd.DataFrame(results)
-        
-        def apply_row_style(row):
-            return [f'background-color: {row["Color"]}'] * len(row)
-
-        st.subheader("📊 Live Trading Signals")
-        if not df.empty:
-            st.dataframe(df.style.apply(apply_row_style, axis=1).hide(axis='index'), use_container_width=True)
-        else:
-            st.warning("No data returned. Ensure the market is open or check API subscription.")
-
+        st.dataframe(df.style.apply(lambda x: [f'background-color: {x.Color}'] * len(x), axis=1).hide(axis='index'), use_container_width=True)
 else:
-    st.info("Please connect your Groww API via Secrets to start.")
+    st.warning("Missing API Keys in Secrets.")
